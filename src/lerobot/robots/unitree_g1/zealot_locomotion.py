@@ -123,6 +123,16 @@ HELD_KP = {"waist": 300.0, "shoulder_pitch": 90.0, "shoulder_roll": 60.0,
            "shoulder": 20.0, "elbow": 60.0, "wrist": 4.0}
 HELD_KD = {"waist": 5.0, "shoulder_pitch": 2.0, "shoulder_roll": 1.0,
            "shoulder": 0.4, "elbow": 1.0, "wrist": 0.2}
+# Upper-body pose the policy was TRAINED against (the playground "home"
+# keyframe): arms bent, not hanging. This is part of the policy's world, not
+# decoration -- the arms carry ~15 kg and straight-down arms move the CoM and
+# the pendulum inertia the legs are balancing. Anything not listed holds 0.
+HELD_HOME = {
+    "shoulderpitch": 0.2,
+    "leftshoulderroll": 0.2,
+    "rightshoulderroll": -0.2,
+    "elbow": 1.28,
+}
 
 # Default Hub location for the released checkpoint.
 DEFAULT_REPO_ID = "haixuantao/zealot-g1-locomotion"
@@ -200,7 +210,7 @@ class ZealotLocomotionController:
 
     control_dt = CONTROL_DT  # read by unitree_g1.py to pace the control thread
 
-    def __init__(self, policy_path: str | None = None):
+    def __init__(self, policy_path: str | None = None, hold_upper_body: bool = True):
         path = policy_path or os.environ.get("ZEALOT_POLICY_PATH")
         if path:
             path = os.path.expanduser(path)
@@ -227,6 +237,25 @@ class ZealotLocomotionController:
                     self.kp[motor.value] = kp
                     self.kd[motor.value] = HELD_KD[frag]
                     break
+
+        # Held-joint targets (waist + arms) at the trained home pose. The robot
+        # layer only writes motor_cmd for joints present in the returned dict,
+        # so joints we omit keep whatever was last commanded -- which at
+        # startup is q=0, i.e. arms hanging straight down, NOT what the policy
+        # trained with. Emitting them here keeps the mass distribution honest.
+        # Set hold_upper_body=False when an arm teleoperator owns those joints.
+        self.held_targets: dict[str, float] = {}
+        if hold_upper_body:
+            for motor in G1_29_JointIndex:
+                if motor.value < NUM_LEG_JOINTS:
+                    continue
+                key = motor.name.lower().replace("_", "").replace("k", "", 1)
+                target = 0.0
+                for frag, val in HELD_HOME.items():
+                    if frag in key:
+                        target = val
+                        break
+                self.held_targets[f"{motor.name}.q"] = target
 
         self.reset()
 
@@ -320,7 +349,9 @@ class ZealotLocomotionController:
 
         # Legs only: joints 12-14 (waist) and the arms stay wherever the
         # upper-body controller/teleop puts them.
-        return {
+        out = {
             f"{G1_29_JointIndex(i).name}.q": float(target[i])
             for i in range(NUM_LEG_JOINTS)
         }
+        out.update(self.held_targets)
+        return out
