@@ -93,6 +93,22 @@ def main() -> int:
         log.exception("run failed")
         return 1
     finally:
+        # Stop the controller thread BEFORE disconnecting. lerobot's
+        # disconnect() sends the zero-gain passive command and only then sets
+        # the shutdown flag, so the 50 Hz controller loop can re-publish normal
+        # stiff gains in the gap -- leaving the robot rigid at its last target
+        # instead of limp. Killing the loop first closes that window.
+        try:
+            robot._shutdown_event.set()
+            thread = getattr(robot, "_controller_thread", None)
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=2.0)
+                if thread.is_alive():
+                    log.error("controller thread still alive -- USE THE E-STOP")
+            log.info("controller loop stopped")
+        except Exception:
+            log.exception("could not stop the controller loop -- USE THE E-STOP")
+
         log.info("disconnecting (sends zero-gain passive command on hardware)")
         try:
             robot.disconnect()
