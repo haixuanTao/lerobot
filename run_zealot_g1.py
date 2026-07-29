@@ -47,9 +47,15 @@ def main() -> int:
     ap.add_argument("--vx", type=float, default=1.0, help="joystick deflection (scaled by the speed cap)")
     args = ap.parse_args()
 
+    # Tolerate an ssh-style "user@host" for --robot-ip: ZMQ needs a bare host,
+    # and pasting the ssh target is the obvious mistake to make.
+    robot_ip = args.robot_ip.split("@", 1)[-1].strip()
+    if robot_ip != args.robot_ip:
+        log.warning("stripped user prefix from --robot-ip: %r -> %r", args.robot_ip, robot_ip)
+
     cfg = UnitreeG1Config(
         is_simulation=args.dry_run,
-        robot_ip=args.robot_ip,
+        robot_ip=robot_ip,
         controller="ZealotLocomotionController",
     )
     robot = UnitreeG1(cfg)
