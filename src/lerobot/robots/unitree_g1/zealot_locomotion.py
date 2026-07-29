@@ -139,6 +139,11 @@ DEFAULT_REPO_ID = "haixuantao/zealot-g1-locomotion"
 DEFAULT_FILENAME = "g1_v19_iter2740.safetensors"
 
 # --- safety ---------------------------------------------------------------
+# Hard cap on the commanded forward speed, independent of the joystick. The
+# released policies overshoot their command, so this bounds what the operator
+# can ask for during bring-up. Override with ZEALOT_MAX_VX.
+MAX_VX_DEFAULT = 0.2
+
 # Blend from the pose the robot is actually in toward the policy's target over
 # this many control steps, so engaging the controller can't step-jerk the legs.
 RAMP_STEPS = 25  # 0.5 s
@@ -220,7 +225,11 @@ class ZealotLocomotionController:
             logger.info(f"Fetching zealot policy from the Hub: {repo_id}/{filename}")
             path = hf_hub_download(repo_id=repo_id, filename=filename)
         self.policy = _Policy(path)
-        logger.info(f"Zealot policy loaded from {path}")
+        self.max_vx = float(os.environ.get("ZEALOT_MAX_VX", MAX_VX_DEFAULT))
+        logger.info(
+            f"Zealot policy loaded from {path} (forward speed capped at "
+            f"{self.max_vx} m/s; set ZEALOT_MAX_VX to change)"
+        )
 
         # Per-motor gains for all 29 joints; legs from the trained spec, upper
         # body from the held-joint table.
@@ -274,7 +283,7 @@ class ZealotLocomotionController:
         # Deadzone, then map the stick onto the TRAINED command ranges. Beyond
         # them the policy is extrapolating, which is where it falls over.
         dz = lambda v: v if abs(v) > 0.1 else 0.0  # noqa: E731
-        self.cmd[0] = np.clip(dz(ly) * CMD_VX, -CMD_VX, CMD_VX)
+        self.cmd[0] = np.clip(dz(ly) * CMD_VX, -self.max_vx, self.max_vx)
         self.cmd[1] = np.clip(dz(-lx) * CMD_VY, -CMD_VY, CMD_VY)
         self.cmd[2] = np.clip(dz(-rx) * CMD_YAW, -CMD_YAW, CMD_YAW)
         self.cmd[3] = 0.0
