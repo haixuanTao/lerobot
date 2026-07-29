@@ -25,8 +25,12 @@ controllers do.
 Weights load straight from the trainer's `.safetensors` (no ONNX export): the
 checkpoint carries both the MLP and the Welford observation normalizer.
 
-Set the checkpoint with `ZEALOT_POLICY_PATH=/path/to/g1_v19.safetensors`, or
-pass `policy_path=` when constructing.
+Weights resolve in this order: an explicit `policy_path=`, then
+`ZEALOT_POLICY_PATH` (a local file), then the Hub — repo
+`ZEALOT_POLICY_REPO` / file `ZEALOT_POLICY_FILE`, defaulting to the
+released checkpoint. The Hub path is the one to prefer: it pins the
+checkpoint by name so a controller and the policy it was validated with
+travel together.
 
 Conventions replicated exactly from the training env (`biped_env_nexus.rs` /
 `velocity_flat.rs`) — every one of these is load-bearing:
@@ -57,6 +61,7 @@ import os
 import struct
 
 import numpy as np
+from huggingface_hub import hf_hub_download
 
 from .g1_utils import (
     REMOTE_AXES,
@@ -118,6 +123,10 @@ HELD_KP = {"waist": 300.0, "shoulder_pitch": 90.0, "shoulder_roll": 60.0,
            "shoulder": 20.0, "elbow": 60.0, "wrist": 4.0}
 HELD_KD = {"waist": 5.0, "shoulder_pitch": 2.0, "shoulder_roll": 1.0,
            "shoulder": 0.4, "elbow": 1.0, "wrist": 0.2}
+
+# Default Hub location for the released checkpoint.
+DEFAULT_REPO_ID = "haixuantao/zealot-g1-locomotion"
+DEFAULT_FILENAME = "g1_v19_iter2740.safetensors"
 
 # --- safety ---------------------------------------------------------------
 # Blend from the pose the robot is actually in toward the policy's target over
@@ -193,11 +202,14 @@ class ZealotLocomotionController:
 
     def __init__(self, policy_path: str | None = None):
         path = policy_path or os.environ.get("ZEALOT_POLICY_PATH")
-        if not path:
-            raise ValueError(
-                "no policy: set ZEALOT_POLICY_PATH=/path/to/checkpoint.safetensors"
-            )
-        self.policy = _Policy(os.path.expanduser(path))
+        if path:
+            path = os.path.expanduser(path)
+        else:
+            repo_id = os.environ.get("ZEALOT_POLICY_REPO", DEFAULT_REPO_ID)
+            filename = os.environ.get("ZEALOT_POLICY_FILE", DEFAULT_FILENAME)
+            logger.info(f"Fetching zealot policy from the Hub: {repo_id}/{filename}")
+            path = hf_hub_download(repo_id=repo_id, filename=filename)
+        self.policy = _Policy(path)
         logger.info(f"Zealot policy loaded from {path}")
 
         # Per-motor gains for all 29 joints; legs from the trained spec, upper
