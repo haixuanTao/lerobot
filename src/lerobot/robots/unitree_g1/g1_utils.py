@@ -70,6 +70,7 @@ def make_locomotion_controller(name: str | None):
     controllers = {
         "GrootLocomotionController": "lerobot.robots.unitree_g1.gr00t_locomotion",
         "HolosomaLocomotionController": "lerobot.robots.unitree_g1.holosoma_locomotion",
+        "ZealotLocomotionController": "lerobot.robots.unitree_g1.zealot_locomotion",
     }
     module_path = controllers.get(name)
     if module_path is None:
