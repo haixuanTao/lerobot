@@ -199,7 +199,27 @@ lerobot-teleoperate \
   --robot.controller=HolosomaLocomotionController
 ```
 
-We support both [GrootLocomotionController](https://github.com/NVlabs/GR00T-WholeBodyControl) and [HolosomaLocomotionController](https://github.com/amazon-far/holosoma) via `--robot.controller`.
+We support [GrootLocomotionController](https://github.com/NVlabs/GR00T-WholeBodyControl), [HolosomaLocomotionController](https://github.com/amazon-far/holosoma) and [ZealotLocomotionController](https://github.com/haixuanTao/zealot) via `--robot.controller`.
+
+#### Zealot
+
+`ZealotLocomotionController` runs a legs-only policy trained in [zealot](https://github.com/haixuanTao/zealot) on the nexus GPU physics engine. Weights come from the Hub by default ([haixuantao/zealot-g1-locomotion](https://huggingface.co/haixuantao/zealot-g1-locomotion)); override with `ZEALOT_POLICY_REPO` / `ZEALOT_POLICY_FILE`, or point `ZEALOT_POLICY_PATH` at a local `.safetensors`.
+
+```bash
+lerobot-teleoperate \
+  --robot.type=unitree_g1 \
+  --robot.is_simulation=true \
+  --teleop.type=unitree_g1 \
+  --teleop.id=wbc_unitree \
+  --robot.controller=ZealotLocomotionController
+```
+
+Two things differ from the other controllers and matter in practice:
+
+- **The PD gains travel with the checkpoint.** The controller sets its own `kp`/`kd` (hip 100/2.5, knee 200/5, ankle 40/2.0). A policy run at gains other than the ones it trained with is controlling a different robot.
+- **The upper body is held at the trained pose** (shoulders ±0.2, elbows 1.28) by default, because the arms' ~15 kg is part of the balance problem the legs learned. Pass `hold_upper_body=False` when an arm teleoperator owns those joints.
+
+The released checkpoint walks; it does **not** yet hold a still stand, and its speed range is narrow (commands between 0.2 and 0.8 m/s all produce roughly 0.7–0.85 m/s). Bring it up gantry-suspended — the simulation's elastic band (`ENABLE_ELASTIC_BAND` in the sim config) is the equivalent safety net for sim testing.
 
 ---
 
