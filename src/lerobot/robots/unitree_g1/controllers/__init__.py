@@ -14,14 +14,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unitree G1 locomotion controllers (Groot, Holosoma, SONIC)."""
+"""Unitree G1 locomotion controllers (Groot, Holosoma, Zealot, SONIC).
 
-from .gr00t_locomotion import GrootLocomotionController
-from .holosoma_locomotion import HolosomaLocomotionController
-from .sonic_whole_body import SonicWholeBodyController
+Exports are lazy (PEP 562): importing this package (which happens whenever any
+single controller module is imported) must not drag in every controller's heavy
+dependencies -- e.g. onnxruntime is only needed by Groot/Holosoma/SONIC, not by
+Zealot, and is not installed on every robot.
+"""
 
-__all__ = [
-    "GrootLocomotionController",
-    "HolosomaLocomotionController",
-    "SonicWholeBodyController",
-]
+import importlib
+
+_CONTROLLER_MODULES = {
+    "GrootLocomotionController": ".gr00t_locomotion",
+    "HolosomaLocomotionController": ".holosoma_locomotion",
+    "SonicWholeBodyController": ".sonic_whole_body",
+    "ZealotLocomotionController": ".zealot_locomotion",
+}
+
+__all__ = list(_CONTROLLER_MODULES)  # noqa: PLE0605
+
+
+def __getattr__(name: str):
+    module_path = _CONTROLLER_MODULES.get(name)
+    if module_path is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(importlib.import_module(module_path, __name__), name)

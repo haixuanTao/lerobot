@@ -87,5 +87,5 @@ class UnitreeG1Config(RobotConfig):
     gravity_compensation: bool = False
 
     # Controller class name, e.g. GrootLocomotionController / HolosomaLocomotionController /
-    # SonicWholeBodyController. None disables it.
+    # ZealotLocomotionController / SonicWholeBodyController. None disables it.
     controller: str | None = None
