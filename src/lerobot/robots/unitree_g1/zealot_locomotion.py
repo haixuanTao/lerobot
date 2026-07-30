@@ -73,7 +73,8 @@ logger = logging.getLogger(__name__)
 
 # --- policy contract ------------------------------------------------------
 NUM_LEG_JOINTS = 12
-OBS_FRAME = 45
+OBS_FRAME = 45   # v21 and earlier
+OBS_FRAME_GYRO = 48  # v22+: + base angular velocity (the actor was yaw-blind)
 OBS_HISTORY = 5
 CONTROL_DT = 0.02  # 50 Hz, zealot's control rate (decimation 4 x 5 ms physics)
 ACTION_SCALE = 0.5
@@ -189,11 +190,16 @@ class _Policy:
         self.count = float(sd["obs_norm.count"].reshape(-1)[0])
         self.obs_dim = self.weights[0].shape[1]
         self.act_dim = self.weights[-1].shape[0]
-        if self.obs_dim != OBS_FRAME * OBS_HISTORY or self.act_dim != NUM_LEG_JOINTS:
+        if self.obs_dim % OBS_HISTORY != 0 or self.act_dim != NUM_LEG_JOINTS:
             raise ValueError(
-                f"checkpoint shape {self.obs_dim}->{self.act_dim}, expected "
-                f"{OBS_FRAME * OBS_HISTORY}->{NUM_LEG_JOINTS}"
+                f"checkpoint shape {self.obs_dim}->{self.act_dim}, expected a "
+                f"multiple of {OBS_HISTORY} -> {NUM_LEG_JOINTS}"
             )
+        # Frame width identifies the observation contract: 45 = v21 and
+        # earlier, 48 = v22+ with the gyro. Sniffed so one controller runs both.
+        self.frame = self.obs_dim // OBS_HISTORY
+        if self.frame not in (OBS_FRAME, OBS_FRAME_GYRO):
+            raise ValueError(f"unsupported obs frame width {self.frame}")
 
     def act(self, obs: np.ndarray) -> np.ndarray:
         var = np.maximum(self.m2 / self.count, 1e-8)
@@ -316,7 +322,7 @@ class ZealotLocomotionController:
         if speed >= STANDING_SPEED:
             self.phase = (self.phase + CONTROL_DT / gait_period_for(speed)) % 1.0
 
-        frame = np.zeros(OBS_FRAME, dtype=np.float32)
+        frame = np.zeros(self.policy.frame, dtype=np.float32)
         frame[0:12] = self.act_hist[0] if self.step_idx >= 2 else 0.0
         frame[12:16] = self.cmd
         frame[16:28] = q - DEFAULT_LEG
@@ -324,6 +330,11 @@ class ZealotLocomotionController:
         frame[40:43] = gravity
         frame[43] = np.sin(2 * np.pi * self.phase)
         frame[44] = np.cos(2 * np.pi * self.phase)
+        if self.policy.frame >= OBS_FRAME_GYRO:
+            # Body-frame angular velocity straight from the IMU gyro. This is
+            # what the v22+ actor uses to close the loop on yaw; on hardware it
+            # is already body-frame, so no rotation is needed.
+            frame[45:48] = np.asarray(lowstate.imu_state.gyroscope, dtype=np.float32)
 
         # Reset-replicate the history on the first step, as the trainer does.
         if self.frames is None:
