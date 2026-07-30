@@ -73,7 +73,7 @@ logger = logging.getLogger(__name__)
 
 # --- policy contract ------------------------------------------------------
 NUM_LEG_JOINTS = 12
-OBS_FRAME = 45   # v21 and earlier
+OBS_FRAME = 45  # v21 and earlier
 OBS_FRAME_GYRO = 48  # v22+: + base angular velocity (the actor was yaw-blind)
 OBS_HISTORY = 5
 CONTROL_DT = 0.02  # 50 Hz, zealot's control rate (decimation 4 x 5 ms physics)
@@ -120,10 +120,22 @@ CMD_YAW = 0.6
 LEG_KP = np.array([100.0, 100.0, 100.0, 200.0, 40.0, 40.0] * 2, dtype=np.float32)
 LEG_KD = np.array([2.5, 2.5, 2.5, 5.0, 2.0, 2.0] * 2, dtype=np.float32)
 # Upper body: zealot's held-joint table (waist 12-14, arms 15-28).
-HELD_KP = {"waist": 300.0, "shoulder_pitch": 90.0, "shoulder_roll": 60.0,
-           "shoulder": 20.0, "elbow": 60.0, "wrist": 4.0}
-HELD_KD = {"waist": 5.0, "shoulder_pitch": 2.0, "shoulder_roll": 1.0,
-           "shoulder": 0.4, "elbow": 1.0, "wrist": 0.2}
+HELD_KP = {
+    "waist": 300.0,
+    "shoulder_pitch": 90.0,
+    "shoulder_roll": 60.0,
+    "shoulder": 20.0,
+    "elbow": 60.0,
+    "wrist": 4.0,
+}
+HELD_KD = {
+    "waist": 5.0,
+    "shoulder_pitch": 2.0,
+    "shoulder_roll": 1.0,
+    "shoulder": 0.4,
+    "elbow": 1.0,
+    "wrist": 0.2,
+}
 # Upper-body pose the policy was TRAINED against (the playground "home"
 # keyframe): arms bent, not hanging. This is part of the policy's world, not
 # decoration -- the arms carry ~15 kg and straight-down arms move the CoM and
@@ -135,9 +147,12 @@ HELD_HOME = {
     "elbow": 1.28,
 }
 
-# Default Hub location for the released checkpoint.
+# Default Hub location for the released checkpoint. This is the checkpoint that
+# has actually been driven on hardware (byte-identical to the local v21 used for
+# the out-and-back bring-up run), which is what the default must be: onboard,
+# with no ZEALOT_POLICY_PATH set, this is the policy that walks the robot.
 DEFAULT_REPO_ID = "haixuantao/zealot-g1-locomotion"
-DEFAULT_FILENAME = "g1_v19_iter2740.safetensors"
+DEFAULT_FILENAME = "g1_v21_iter4560.safetensors"
 
 # --- safety ---------------------------------------------------------------
 # Hard cap on the commanded forward speed, independent of the joystick. The
@@ -156,8 +171,14 @@ MAX_TARGET_DELTA = 0.2
 
 def _load_safetensors(path: str) -> dict[str, np.ndarray]:
     """Minimal pure-numpy safetensors reader (no torch dependency)."""
-    dtypes = {"F32": np.float32, "F64": np.float64, "I64": np.int64,
-              "I32": np.int32, "U32": np.uint32, "F16": np.float16}
+    dtypes = {
+        "F32": np.float32,
+        "F64": np.float64,
+        "I64": np.int64,
+        "I32": np.int32,
+        "U32": np.uint32,
+        "F16": np.float16,
+    }
     with open(path, "rb") as f:
         (header_len,) = struct.unpack("<Q", f.read(8))
         header = json.loads(f.read(header_len))
@@ -301,9 +322,7 @@ class ZealotLocomotionController:
 
         self._command_from_remote(action)
 
-        q = np.array(
-            [lowstate.motor_state[i].q for i in range(NUM_LEG_JOINTS)], dtype=np.float32
-        )
+        q = np.array([lowstate.motor_state[i].q for i in range(NUM_LEG_JOINTS)], dtype=np.float32)
         # Finite-difference velocity, matching training (see module docstring).
         if self.prev_q is None:
             qdot = np.zeros(NUM_LEG_JOINTS, dtype=np.float32)
@@ -311,9 +330,7 @@ class ZealotLocomotionController:
             qdot = (q - self.prev_q) / CONTROL_DT
         self.prev_q = q.copy()
 
-        gravity = np.asarray(
-            get_gravity_orientation(lowstate.imu_state.quaternion), dtype=np.float32
-        )
+        gravity = np.asarray(get_gravity_orientation(lowstate.imu_state.quaternion), dtype=np.float32)
 
         # Command-derived clock: frozen when the command is a stand, so the
         # policy sees a distinct standing observation instead of a clock that
@@ -367,11 +384,12 @@ class ZealotLocomotionController:
         self.prev_target = target.copy()
         self.step_idx += 1
 
-        # Legs only: joints 12-14 (waist) and the arms stay wherever the
-        # upper-body controller/teleop puts them.
-        out = {
-            f"{G1_29_JointIndex(i).name}.q": float(target[i])
-            for i in range(NUM_LEG_JOINTS)
-        }
-        out.update(self.held_targets)
+        out = {f"{G1_29_JointIndex(i).name}.q": float(target[i]) for i in range(NUM_LEG_JOINTS)}
+        # Hold the upper body ONLY where nobody else is driving it. The robot
+        # layer publishes arm targets from the teleoperator/policy out of
+        # `send_action`, while this controller runs on its own 50 Hz thread, so
+        # emitting a held target for a joint the operator is also commanding
+        # makes the two publishers fight at 50 Hz. Anything absent from the
+        # incoming action is ours to hold at the trained home pose.
+        out.update({k: v for k, v in self.held_targets.items() if k not in action})
         return out

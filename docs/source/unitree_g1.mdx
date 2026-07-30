@@ -331,6 +331,44 @@ On connect, the robot eases every joint to the decoder's `default_angles` before
 
 ---
 
+## Legs-only locomotion with Zealot
+
+The `ZealotLocomotionController` runs a legs-only policy trained in `zealot` (nexus GPU
+physics) as the G1's locomotion layer. It consumes joystick axes (`remote.*`) and emits
+12 leg targets at 50 Hz; the waist and arms are PD-held at the pose the policy trained
+against, so it composes with an arm teleoperator the way the other legs-only controllers
+do — any arm joint the teleoperator commands is left to it, and only the joints nobody
+else drives are held.
+
+Weights load straight from the trainer's `.safetensors` (no ONNX export). Resolution
+order is an explicit `policy_path=`, then `ZEALOT_POLICY_PATH` (a local file), then the
+Hub (`ZEALOT_POLICY_REPO` / `ZEALOT_POLICY_FILE`). Prefer the Hub default: it pins the
+checkpoint that has actually been driven on hardware.
+
+**On the robot** — run the controller onboard against local DDS at full rate:
+
+```bash
+cd ~/lerobot
+python -m lerobot.robots.unitree_g1.run_g1_server --handshake
+```
+
+**From your laptop** — agree on the controller; the physical Unitree remote (or the
+laptop's `remote.*` axes) then drives it:
+
+```bash
+python -m lerobot.robots.unitree_g1.run_g1_server \
+    --handshake-client ZealotLocomotionController --server-ip <ROBOT_IP>
+```
+
+<Tip warning={true}>
+  Releasing the stick does **not** stop this policy — at zero command it keeps walking.
+  Forward speed is capped in the controller (`ZEALOT_MAX_VX`, default 0.2 m/s), targets
+  are slew-rate limited, and engaging blends from the measured pose over 0.5 s, but the
+  stop is a duration or an e-stop, not the stick. Use a gantry for first runs.
+</Tip>
+
+---
+
 ## Additional Resources
 
 - [Unitree SDK Documentation](https://github.com/unitreerobotics/unitree_sdk2_python)
