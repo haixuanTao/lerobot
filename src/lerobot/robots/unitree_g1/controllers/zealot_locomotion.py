@@ -131,6 +131,11 @@ STANDING_SPEED = 0.1
 
 # Command ranges the policy was trained on. Joystick axes map onto these;
 # anything beyond is extrapolation the policy has never seen.
+#
+# CMD_VX is the 45-dim generation's ceiling. v24's model card publishes fall-free
+# cross-engine evals at a 0.8 m/s command, so that generation is good to 0.8 -- raise it
+# with ZEALOT_CMD_VX when running v24. Past a generation's own range the policy is
+# extrapolating, which is where it falls over.
 CMD_VX = 0.5
 CMD_VY = 0.3
 CMD_YAW = 0.6
@@ -280,11 +285,20 @@ class ZealotLocomotionController:
             path = hf_hub_download(repo_id=repo_id, filename=filename)
         self.policy = _Policy(path)
         self.max_vx = float(os.environ.get("ZEALOT_MAX_VX", MAX_VX_DEFAULT))
+        self.cmd_vx = float(os.environ.get("ZEALOT_CMD_VX", CMD_VX))
+        # The stick maps onto whichever is smaller, so quoting the effective number
+        # avoids the trap of raising one knob and silently getting the other.
+        effective = min(self.cmd_vx, self.max_vx)
         logger.info(
             f"Zealot policy loaded from {path} (obs frame {self.policy.frame}, action "
-            f"scale {self.policy.action_scale}; forward speed capped at {self.max_vx} m/s, "
-            f"set ZEALOT_MAX_VX to change)"
+            f"scale {self.policy.action_scale}; full stick = {effective} m/s forward, from "
+            f"ZEALOT_MAX_VX={self.max_vx} and ZEALOT_CMD_VX={self.cmd_vx})"
         )
+        if self.cmd_vx > CMD_VX and self.policy.frame < OBS_FRAME_GYRO:
+            logger.warning(
+                f"ZEALOT_CMD_VX={self.cmd_vx} exceeds the {CMD_VX} m/s range this "
+                f"{self.policy.frame}-dim generation was trained on -- that is extrapolation."
+            )
 
         # Per-motor gains for all 29 joints; legs from the trained spec, upper
         # body from the held-joint table.
@@ -350,7 +364,7 @@ class ZealotLocomotionController:
         # its travel -- at the 0.2 default that is 40%, so more than half the stick did
         # nothing and the usable band was painfully twitchy. Mapping full deflection
         # onto the cap keeps every trained limit intact and gives back the resolution.
-        vx_range = min(CMD_VX, self.max_vx)
+        vx_range = min(self.cmd_vx, self.max_vx)
         self.cmd[0] = np.clip(dz(ly) * vx_range, -vx_range, vx_range)
         self.cmd[1] = np.clip(dz(-lx) * CMD_VY, -CMD_VY, CMD_VY)
         self.cmd[2] = np.clip(dz(-rx) * CMD_YAW, -CMD_YAW, CMD_YAW)
