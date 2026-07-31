@@ -147,30 +147,58 @@ class _XInputPadReader:
 
         self._usb_util = usb.util
         self._usb_core = usb.core
-        self._dev = usb.core.find(idVendor=vid, idProduct=pid)
+        self._vid, self._pid = vid, pid
+        self._dev = self._open()
         if self._dev is None:
             raise DeviceNotConnectedError(
                 f"No USB gamepad {vid:04x}:{pid:04x}. Check `lsusb`, and that a udev rule "
                 f"grants access (the device node is root-owned by default)."
             )
-        # Defensive: nothing binds a class-0xff interface on the G1's kernel, but this
-        # keeps the reader working on a host that does have xpad.
-        try:
-            if self._dev.is_kernel_driver_active(0):
-                self._dev.detach_kernel_driver(0)
-        except (NotImplementedError, usb.core.USBError):
-            pass
-        self._dev.set_configuration()
 
         self._deadman_mask = self._BUTTONS2[deadman] if 0 <= deadman < len(self._BUTTONS2) else 0
         self._expo = max(1.0, expo)
         self._smoothing_s = max(0.0, smoothing_s)
         self._lock = threading.Lock()
         self._state: dict[str, float] | None = None
+        self._connected = True
         self._smoothed = [0.0, 0.0, 0.0, 0.0]
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+    def _open(self):
+        """Find and claim the pad. Returns None if it is not present."""
+        dev = self._usb_core.find(idVendor=self._vid, idProduct=self._pid)
+        if dev is None:
+            return None
+        # Defensive: nothing binds a class-0xff interface on the G1's kernel, but this
+        # keeps the reader working on a host that does have xpad.
+        try:
+            if dev.is_kernel_driver_active(0):
+                dev.detach_kernel_driver(0)
+        except (NotImplementedError, self._usb_core.USBError):
+            pass
+        try:
+            dev.set_configuration()
+        except self._usb_core.USBError:
+            return None
+        return dev
+
+    def _drop(self, why: str) -> None:
+        """Mark the pad gone and DISCARD its last state.
+
+        Discarding is the safety-critical half: a latched final reading would keep
+        commanding whatever the stick held at the moment it was unplugged, so yanking
+        the cable mid-stride would leave the robot walking on the last command forever.
+        """
+        with self._lock:
+            was_connected, self._connected, self._state = self._connected, False, None
+        self._smoothed = [0.0, 0.0, 0.0, 0.0]
+        if was_connected:
+            logger.warning(f"[UnitreeG1] USB gamepad lost ({why}); commanding zero, waiting for replug")
+        with contextlib.suppress(Exception):
+            self._usb_util.dispose_resources(self._dev)
+        self._dev = None
 
     def _shape(self, raw: float) -> float:
         """Expo curve: |v|**expo preserves the endpoints but flattens the response near
@@ -184,14 +212,28 @@ class _XInputPadReader:
         axes = struct.Struct("<hhhh")
         last = time.time()
         while not self._stop.is_set():
+            if self._dev is None:
+                # Unplugged: retry the open until it comes back. The controller keeps
+                # running throughout -- losing the input device must never take down the
+                # balance loop, which is the only thing holding the robot up.
+                self._dev = self._open()
+                if self._dev is None:
+                    self._stop.wait(0.5)
+                    continue
+                with self._lock:
+                    self._connected = True
+                self._smoothed = [0.0, 0.0, 0.0, 0.0]
+                last = time.time()
+                logger.info("[UnitreeG1] USB gamepad reconnected")
+
             try:
                 data = bytes(self._dev.read(self._EP_IN, self._REPORT_LEN, timeout=100))
             except self._usb_core.USBError as e:
                 # ETIMEDOUT just means "state unchanged" for a report-on-change pad.
                 if e.errno == 110:
                     continue
-                logger.warning(f"[UnitreeG1] USB pad read failed, stopping reader: {e}")
-                return
+                self._drop(str(e))
+                continue
             if len(data) < 14 or data[0] != 0x00:
                 continue
 
@@ -225,7 +267,12 @@ class _XInputPadReader:
         is not held, or -- when no deadman is configured -- every stick is centred.
         """
         with self._lock:
-            state = self._state
+            state, connected = self._state, self._connected
+        if not connected:
+            # An unplugged pad ASSERTS zero rather than yielding. Yielding would fall
+            # back to whatever was last written into controller_input -- which for a
+            # pad-driven robot is a stale command, i.e. exactly what we just discarded.
+            return dict.fromkeys(REMOTE_AXES, 0.0)
         if state is None or not state["_deadman"]:
             return None
         axes = {k: v for k, v in state.items() if not k.startswith("_")}
@@ -235,9 +282,10 @@ class _XInputPadReader:
 
     def stop(self) -> None:
         self._stop.set()
-        self._thread.join(timeout=1.0)
-        with contextlib.suppress(Exception):
-            self._usb_util.dispose_resources(self._dev)
+        self._thread.join(timeout=2.0)
+        if self._dev is not None:
+            with contextlib.suppress(Exception):
+                self._usb_util.dispose_resources(self._dev)
 
 
 @dataclass
