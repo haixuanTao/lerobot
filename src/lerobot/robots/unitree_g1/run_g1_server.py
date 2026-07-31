@@ -83,6 +83,7 @@ VALID_CONTROLLERS = (
     "GrootLocomotionController",
     "HolosomaLocomotionController",
     "SonicWholeBodyController",
+    "ZealotLocomotionController",
 )
 # SONIC latent-token dimensionality (mirrors sonic_whole_body.TOKEN_DIM; kept local so
 # the handshake can run without importing the heavy controller / onnxruntime).

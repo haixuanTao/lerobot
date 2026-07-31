@@ -14,14 +14,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unitree G1 locomotion controllers (Groot, Holosoma, SONIC)."""
+"""Unitree G1 locomotion controllers (Groot, Holosoma, SONIC, Zealot).
 
-from .gr00t_locomotion import GrootLocomotionController
-from .holosoma_locomotion import HolosomaLocomotionController
-from .sonic_whole_body import SonicWholeBodyController
+Re-exports are lazy: the ONNX-backed controllers pull `onnxruntime` at import
+time, and this package's `__init__` runs on *any* submodule import. Eager
+re-exports would therefore make a controller that needs no ONNX (Zealot is pure
+numpy) unimportable on a robot that has no onnxruntime installed.
+"""
 
-__all__ = [
-    "GrootLocomotionController",
-    "HolosomaLocomotionController",
-    "SonicWholeBodyController",
-]
+import importlib
+
+_CONTROLLER_MODULES = {
+    "GrootLocomotionController": "gr00t_locomotion",
+    "HolosomaLocomotionController": "holosoma_locomotion",
+    "SonicWholeBodyController": "sonic_whole_body",
+    "ZealotLocomotionController": "zealot_locomotion",
+}
+
+__all__ = list(_CONTROLLER_MODULES)
+
+
+def __getattr__(name: str):
+    module_name = _CONTROLLER_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(importlib.import_module(f".{module_name}", __name__), name)
