@@ -291,6 +291,7 @@ class ZealotLocomotionController:
         self.policy = _Policy(path)
         self.max_vx = float(os.environ.get("ZEALOT_MAX_VX", MAX_VX_DEFAULT))
         self.cmd_vx = float(os.environ.get("ZEALOT_CMD_VX", CMD_VX))
+        self.stand_phase_zero = os.environ.get("ZEALOT_STAND_PHASE", "hold").lower() == "zero"
         # The stick maps onto whichever is smaller, so quoting the effective number
         # avoids the trap of raising one knob and silently getting the other.
         effective = min(self.cmd_vx, self.max_vx)
@@ -398,6 +399,13 @@ class ZealotLocomotionController:
         speed = float(np.linalg.norm(self.cmd[:3]))
         if speed >= STANDING_SPEED:
             self.phase = (self.phase + CONTROL_DT / gait_period_for(speed)) % 1.0
+        elif self.stand_phase_zero:
+            # Freezing leaves the clock wherever the stride happened to stop, so a
+            # standing robot is told it is part-way through a swing forever. Snapping to
+            # 0 gives the canonical (sin=0, cos=1) stand instead. Which one matches the
+            # trainer is not recorded anywhere, hence the switch -- set
+            # ZEALOT_STAND_PHASE=zero if the robot buzzes while standing.
+            self.phase = 0.0
 
         frame = np.zeros(self.policy.frame, dtype=np.float32)
         frame[0:12] = self.act_hist[0] if self.step_idx >= 2 else 0.0
