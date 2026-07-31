@@ -46,17 +46,34 @@ import json
 import signal
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import zmq
-from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
-from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
-from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_ as hg_LowCmd, LowState_ as hg_LowState
-from unitree_sdk2py.utils.crc import CRC
 
 from lerobot.cameras.zmq.image_server import ImageServer
+from lerobot.utils.import_utils import _unitree_sdk_available, require_package
+
+# The Unitree SDK is only needed by the paths that touch DDS (the raw bridge and the
+# onboard controller), all of which run ON the robot. The handshake client and
+# ``--handshake-only`` server are documented as laptop-runnable, and a laptop has no
+# reason to carry the SDK -- so importing it at module scope would break the very paths
+# whose point is to run without DDS.
+if TYPE_CHECKING or _unitree_sdk_available:
+    from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import MotionSwitcherClient
+    from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
+    from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
+    from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_ as hg_LowCmd, LowState_ as hg_LowState
+    from unitree_sdk2py.utils.crc import CRC
+else:
+    MotionSwitcherClient = None
+    ChannelFactoryInitialize = None
+    ChannelPublisher = None
+    ChannelSubscriber = None
+    unitree_hg_msg_dds__LowCmd_ = None
+    hg_LowCmd = None
+    hg_LowState = None
+    CRC = None
 
 # DDS topic names follow Unitree SDK naming conventions
 # ruff: noqa: N816
@@ -550,6 +567,9 @@ def main() -> None:
         camera_thread = threading.Thread(target=camera_server.run, daemon=True)
         camera_thread.start()
         print(f"Camera server started on port {args.camera_port} (device {args.camera_device})")
+
+    # Everything below talks to DDS, so this is where the SDK stops being optional.
+    require_package("unitree-sdk2py", extra="unitree_g1", import_name="unitree_sdk2py")
 
     # initialize DDS
     ChannelFactoryInitialize(0)
