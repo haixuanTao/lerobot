@@ -291,7 +291,12 @@ class ZealotLocomotionController:
         self.policy = _Policy(path)
         self.max_vx = float(os.environ.get("ZEALOT_MAX_VX", MAX_VX_DEFAULT))
         self.cmd_vx = float(os.environ.get("ZEALOT_CMD_VX", CMD_VX))
-        self.stand_phase_zero = os.environ.get("ZEALOT_STAND_PHASE", "hold").lower() == "zero"
+        # What the gait clock does at a stand: "hold" freezes it wherever the stride
+        # stopped, "zero" snaps to the canonical stand, "run" keeps it advancing so the
+        # robot marches in place. Not recorded in the checkpoint, so it is a switch.
+        self.stand_phase = os.environ.get("ZEALOT_STAND_PHASE", "hold").lower()
+        if self.stand_phase not in ("hold", "zero", "run"):
+            raise ValueError(f"ZEALOT_STAND_PHASE must be hold/zero/run, got {self.stand_phase!r}")
         # The stick maps onto whichever is smaller, so quoting the effective number
         # avoids the trap of raising one knob and silently getting the other.
         effective = min(self.cmd_vx, self.max_vx)
@@ -397,15 +402,16 @@ class ZealotLocomotionController:
         # policy sees a distinct standing observation instead of a clock that
         # keeps waving "swing" at it.
         speed = float(np.linalg.norm(self.cmd[:3]))
-        if speed >= STANDING_SPEED:
+        if speed >= STANDING_SPEED or self.stand_phase == "run":
+            # "run": the clock never stops, so a zero command marches in place at the
+            # slow cadence (gait_period_for(0) == GAIT_PERIOD_SLOW). This is what the
+            # policy does in the training sim, which is the strongest evidence available
+            # about what it expects -- a frozen clock is an observation it never saw.
             self.phase = (self.phase + CONTROL_DT / gait_period_for(speed)) % 1.0
-        elif self.stand_phase_zero:
-            # Freezing leaves the clock wherever the stride happened to stop, so a
-            # standing robot is told it is part-way through a swing forever. Snapping to
-            # 0 gives the canonical (sin=0, cos=1) stand instead. Which one matches the
-            # trainer is not recorded anywhere, hence the switch -- set
-            # ZEALOT_STAND_PHASE=zero if the robot buzzes while standing.
+        elif self.stand_phase == "zero":
+            # Canonical (sin=0, cos=1) stand, rather than wherever the stride stopped.
             self.phase = 0.0
+        # "hold" (default): leave the phase where it froze.
 
         frame = np.zeros(self.policy.frame, dtype=np.float32)
         frame[0:12] = self.act_hist[0] if self.step_idx >= 2 else 0.0
