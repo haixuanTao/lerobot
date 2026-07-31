@@ -252,7 +252,12 @@ class _Policy:
         self.frame = self.obs_dim // OBS_HISTORY
         if self.frame not in ACTION_SCALE:
             raise ValueError(f"unsupported obs frame width {self.frame}")
-        self.action_scale = ACTION_SCALE[self.frame]
+        # Nothing in the checkpoint records the scale -- there is no __metadata__ in any
+        # of the released files -- so this table is copied from the model card and is not
+        # verifiable from the weights. Override with ZEALOT_ACTION_SCALE to A/B it on
+        # hardware: at the wrong value the policy commands half (or double) the joint
+        # excursion it planned for, which reads as "damped" and then as "unstable".
+        self.action_scale = float(os.environ.get("ZEALOT_ACTION_SCALE", ACTION_SCALE[self.frame]))
 
     def act(self, obs: np.ndarray) -> np.ndarray:
         var = np.maximum(self.m2 / self.count, 1e-8)
