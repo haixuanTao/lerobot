@@ -81,6 +81,11 @@ class LocomotionController(Protocol):
 kTopicLowCommand_Debug = "rt/lowcmd"
 kTopicLowState = "rt/lowstate"
 
+# Damping-mode release gain, matching Unitree's own create_damping_cmd (kp=0, kd=8 on
+# every motor). The last low-level command persists on the robot, so a single damped
+# message keeps the joints damped after we stop publishing.
+DAMPING_KD = 8.0
+
 # Wireless-remote button byte layout, mapped to the positional button indices the
 # locomotion controllers expect. Used in onboard mode to read the physical Unitree
 # remote from lowstate (mirrors the exo teleoperator's RemoteController).
@@ -748,47 +753,54 @@ class UnitreeG1(Robot):
             fps = int(1.0 / self.controller.control_dt)
             logger.info(f"Controller thread started ({fps}Hz)")
 
-    def _send_zero_torque(self) -> None:
-        """Send a zero-gain command to make joints passive before shutting down."""
+    def _send_damping(self) -> None:
+        """Release the robot into damping mode (kp=0, kd>0) before shutting down.
+
+        This is Unitree's own safe-stop. With position gains off and only velocity
+        damping left, the robot sinks under its own weight instead of free-falling the
+        way a fully zero-gain command would drop it. It still does NOT hold itself up --
+        the operator must be taking the weight.
+        """
         try:
             with self._lowstate_lock:
                 lowstate = self._lowstate
             if lowstate is None:
                 return
             action = {f"{motor.name}.q": lowstate.motor_state[motor.value].q for motor in G1_29_JointIndex}
-            zero_gains = np.zeros(29, dtype=np.float32)
-            self.publish_lowcmd(action, kp=zero_gains, kd=zero_gains, tau=zero_gains)
-            logger.info("Sent zero-torque command for safe shutdown")
+            zeros = np.zeros(29, dtype=np.float32)
+            damping = np.full(29, DAMPING_KD, dtype=np.float32)
+            self.publish_lowcmd(action, kp=zeros, kd=damping, tau=zeros)
+            logger.info(f"Sent damping command (kp=0, kd={DAMPING_KD}) for safe shutdown")
         except Exception as e:
-            logger.warning(f"Failed to send zero-torque on disconnect: {e}")
+            logger.warning(f"Failed to send damping command on disconnect: {e}")
 
     def disconnect(self):
         if self._client:
             self._disconnect_client()
             return
 
-        # Put robot in passive mode before stopping threads
-        if not self.config.is_simulation:
-            self._send_zero_torque()
-
-        # Signal thread to stop and unblock any waits
+        # Stop the controller loop BEFORE releasing. That loop republishes stiff gains at
+        # 50 Hz, so releasing first would let it overwrite the damping command in the gap.
         self._shutdown_event.set()
+        if self._controller_thread is not None:
+            self._controller_thread.join(timeout=2.0)
+            if self._controller_thread.is_alive():
+                logger.warning("Controller thread did not stop cleanly")
 
         if self._usb_pad is not None:
             self._usb_pad.stop()
             self._usb_pad = None
+
+        # Release into damping mode, now that nothing else is publishing. Uses the last
+        # cached lowstate; with kp=0 the position targets are inert, only damping matters.
+        if not self.config.is_simulation:
+            self._send_damping()
 
         # Wait for subscribe thread to finish
         if self.subscribe_thread is not None:
             self.subscribe_thread.join(timeout=2.0)
             if self.subscribe_thread.is_alive():
                 logger.warning("Subscribe thread did not stop cleanly")
-
-        # Wait for controller thread to finish
-        if self._controller_thread is not None:
-            self._controller_thread.join(timeout=2.0)
-            if self._controller_thread.is_alive():
-                logger.warning("Controller thread did not stop cleanly")
 
         # Close simulation environment
         if self.config.is_simulation and self.sim_env is not None:
