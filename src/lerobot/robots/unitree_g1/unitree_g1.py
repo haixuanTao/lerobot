@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -129,9 +130,17 @@ class _XInputPadReader:
     _EP_IN = 0x81
     _REPORT_LEN = 20
     _AXIS_MAX = 32767.0
-    _BTN_LB = 0x01  # in buttons2; used as the deadman
+    # buttons2 bit layout, for naming a deadman by index: LB, RB, guide, -, A, B, X, Y.
+    _BUTTONS2 = (0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80)
 
-    def __init__(self, vid: int, pid: int):
+    def __init__(
+        self,
+        vid: int,
+        pid: int,
+        deadman: int = -1,
+        expo: float = 1.0,
+        smoothing_s: float = 0.0,
+    ):
         require_package("pyusb", extra="unitree_g1", import_name="usb")
         import usb.core
         import usb.util
@@ -153,16 +162,27 @@ class _XInputPadReader:
             pass
         self._dev.set_configuration()
 
+        self._deadman_mask = self._BUTTONS2[deadman] if 0 <= deadman < len(self._BUTTONS2) else 0
+        self._expo = max(1.0, expo)
+        self._smoothing_s = max(0.0, smoothing_s)
         self._lock = threading.Lock()
         self._state: dict[str, float] | None = None
+        self._smoothed = [0.0, 0.0, 0.0, 0.0]
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+    def _shape(self, raw: float) -> float:
+        """Expo curve: |v|**expo preserves the endpoints but flattens the response near
+        centre, which is where fine speed control lives. expo=1 is linear."""
+        v = max(-1.0, raw / self._AXIS_MAX)
+        return (1.0 if v >= 0 else -1.0) * abs(v) ** self._expo
 
     def _run(self) -> None:
         import struct
 
         axes = struct.Struct("<hhhh")
+        last = time.time()
         while not self._stop.is_set():
             try:
                 data = bytes(self._dev.read(self._EP_IN, self._REPORT_LEN, timeout=100))
@@ -174,28 +194,44 @@ class _XInputPadReader:
                 return
             if len(data) < 14 or data[0] != 0x00:
                 continue
-            lx, ly, rx, ry = axes.unpack_from(data, 6)
+
+            now = time.time()
+            dt, last = now - last, now
+            target = [self._shape(v) for v in axes.unpack_from(data, 6)]
+            # Time-based low-pass, so the feel does not change with the pad's report
+            # rate (XInput pads report on change, so intervals are wildly uneven).
+            if self._smoothing_s > 0.0:
+                alpha = 1.0 - math.exp(-max(dt, 0.0) / self._smoothing_s)
+                self._smoothed = [s + alpha * (t - s) for s, t in zip(self._smoothed, target, strict=True)]
+            else:
+                self._smoothed = target
+
+            lx, ly, rx, ry = self._smoothed
             with self._lock:
                 self._state = {
-                    "remote.lx": max(-1.0, lx / self._AXIS_MAX),
-                    "remote.ly": max(-1.0, ly / self._AXIS_MAX),
-                    "remote.rx": max(-1.0, rx / self._AXIS_MAX),
-                    "remote.ry": max(-1.0, ry / self._AXIS_MAX),
-                    "_deadman": float(bool(data[3] & self._BTN_LB)),
+                    "remote.lx": lx,
+                    "remote.ly": ly,
+                    "remote.rx": rx,
+                    "remote.ry": ry,
+                    "_deadman": float(not self._deadman_mask or bool(data[3] & self._deadman_mask)),
                 }
 
     def read(self) -> dict | None:
-        """Latest axes, or None when the deadman is not held / nothing received yet.
+        """Latest axes, or None when this pad is not actively driving.
 
         Returning None (rather than zeros) is what lets the caller treat this exactly
         like the physical remote: an idle input source yields to whatever else is
-        driving, instead of fighting it with a zero command.
+        driving, instead of fighting it with a zero command. "Idle" means the deadman
+        is not held, or -- when no deadman is configured -- every stick is centred.
         """
         with self._lock:
             state = self._state
         if state is None or not state["_deadman"]:
             return None
-        return {k: v for k, v in state.items() if not k.startswith("_")}
+        axes = {k: v for k, v in state.items() if not k.startswith("_")}
+        if not any(abs(v) > 1e-2 for v in axes.values()):
+            return None
+        return axes
 
     def stop(self) -> None:
         self._stop.set()
@@ -685,8 +721,19 @@ class UnitreeG1(Robot):
             if self.config.usb_pad:
                 vid, _, pid = self.config.usb_pad_id.partition(":")
                 try:
-                    self._usb_pad = _XInputPadReader(int(vid, 16), int(pid, 16))
-                    logger.info(f"USB gamepad {self.config.usb_pad_id} ready (hold LB to command)")
+                    self._usb_pad = _XInputPadReader(
+                        int(vid, 16),
+                        int(pid, 16),
+                        deadman=self.config.usb_pad_deadman,
+                        expo=self.config.usb_pad_expo,
+                        smoothing_s=self.config.usb_pad_smoothing_s,
+                    )
+                    hold = (
+                        f"hold button {self.config.usb_pad_deadman}"
+                        if self.config.usb_pad_deadman >= 0
+                        else "no deadman"
+                    )
+                    logger.info(f"USB gamepad {self.config.usb_pad_id} ready ({hold})")
                 except Exception as e:  # noqa: BLE001
                     logger.error(f"USB gamepad {self.config.usb_pad_id} unavailable: {e}")
 

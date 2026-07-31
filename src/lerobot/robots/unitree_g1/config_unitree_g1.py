@@ -89,6 +89,25 @@ class UnitreeG1Config(RobotConfig):
     # The physical Unitree remote still takes priority whenever it is active.
     usb_pad: bool = False
     usb_pad_id: str = "2f24:008f"
+    # Deadman button index into the XInput buttons2 byte (0=LB, 1=RB, 4=A, 5=B, 6=X,
+    # 7=Y); -1 disables it, which is the default. A deadman is NOT a stop here: a
+    # locomotion policy keeps walking on a zero command (v24 creeps ~0.2 m/s), so
+    # releasing it does not halt the robot -- only shutting the controller down does.
+    # It costs a held finger and buys little, so it is opt-in.
+    usb_pad_deadman: int = -1
+    # Stick response shaping. expo>1 flattens the curve near centre for finer control,
+    # but the controller applies its OWN deadzone downstream (0.1 for zealot), so expo
+    # pushes the point where the robot first moves UP the travel: at expo=2 nothing
+    # happens until 0.1**(1/2) = 0.32 of stick. Default 1.0 (linear) keeps the deadband
+    # at the controller's own 0.1 -- raise it only if the low end still feels twitchy,
+    # and expect to lose the bottom of the range in exchange.
+    usb_pad_expo: float = 1.0
+    # Time constant of a low-pass on the axes: takes the step out of a flicked stick
+    # without moving where the response starts. OFF by default -- it trades away
+    # responsiveness, and v24 already feels sluggish on hardware (it commands ~40%
+    # smaller joint excursions than v21). Fix twitchiness with the range mapping first,
+    # which costs no latency, and only add smoothing if the stick itself is noisy.
+    usb_pad_smoothing_s: float = 0.0
 
     # Cameras (ZMQ-based remote cameras)
     cameras: dict[str, CameraConfig] = field(default_factory=dict)

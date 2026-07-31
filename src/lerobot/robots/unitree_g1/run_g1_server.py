@@ -227,6 +227,9 @@ def serve_onboard_controller(
     state_fps: float = 30.0,
     usb_pad: bool = False,
     usb_pad_id: str = "2f24:008f",
+    usb_pad_deadman: int = -1,
+    usb_pad_expo: float = 1.0,
+    usb_pad_smoothing_s: float = 0.0,
     stop: threading.Event | None = None,
 ) -> None:
     """Run the negotiated controller ONBOARD -- the single control path on the robot.
@@ -258,6 +261,9 @@ def serve_onboard_controller(
         physical_remote=not sim,
         usb_pad=usb_pad,
         usb_pad_id=usb_pad_id,
+        usb_pad_deadman=usb_pad_deadman,
+        usb_pad_expo=usb_pad_expo,
+        usb_pad_smoothing_s=usb_pad_smoothing_s,
         cameras={},
     )
 
@@ -484,6 +490,29 @@ def main() -> None:
         metavar="VID:PID",
         help="[--usb-pad] USB id of the gamepad (default: 2f24:008f)",
     )
+    parser.add_argument(
+        "--usb-pad-deadman",
+        type=int,
+        default=-1,
+        metavar="BUTTON",
+        help="[--usb-pad] button that must be held to command (0=LB, 1=RB, 4=A, 5=B, "
+        "6=X, 7=Y); -1 disables (default)",
+    )
+    parser.add_argument(
+        "--usb-pad-expo",
+        type=float,
+        default=1.0,
+        help="[--usb-pad] stick expo; 1.0 is linear. >1 is finer near centre but raises the\n"
+        "point where the robot first moves, since the controller adds its own deadzone",
+    )
+    parser.add_argument(
+        "--usb-pad-smoothing",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="[--usb-pad] low-pass time constant on the sticks; 0 disables (default). "
+        "Adds latency -- prefer the range mapping for twitchiness",
+    )
     parser.add_argument("--server-ip", default="127.0.0.1", help="[--handshake-client] server IP")
     parser.add_argument(
         "--sonic-token-action",
@@ -564,6 +593,9 @@ def main() -> None:
                 camera_port=args.camera_port,
                 usb_pad=args.usb_pad,
                 usb_pad_id=args.usb_pad_id,
+                usb_pad_deadman=args.usb_pad_deadman,
+                usb_pad_expo=args.usb_pad_expo,
+                usb_pad_smoothing_s=args.usb_pad_smoothing,
             )
             return
         print("[handshake] client selected raw DDS bridge (laptop owns control) -> legacy forward.")

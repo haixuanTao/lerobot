@@ -134,6 +134,8 @@ STANDING_SPEED = 0.1
 CMD_VX = 0.5
 CMD_VY = 0.3
 CMD_YAW = 0.6
+# Stick deadzone, rescaled rather than clipped (see _command_from_remote).
+STICK_DEADZONE = 0.1
 
 # PD gains, zealot's `unitree_g1_agile` spec with the v19 ankle package
 # (ankle kp 20 -> 40, kd 0.2 -> 2.0, matching the unitree_rl_gym deploy pair).
@@ -333,10 +335,23 @@ class ZealotLocomotionController:
 
     def _command_from_remote(self, action: dict) -> None:
         lx, ly, rx, _ry = (float(action.get(k, 0.0)) for k in REMOTE_AXES)
-        # Deadzone, then map the stick onto the TRAINED command ranges. Beyond
-        # them the policy is extrapolating, which is where it falls over.
-        dz = lambda v: v if abs(v) > 0.1 else 0.0  # noqa: E731
-        self.cmd[0] = np.clip(dz(ly) * CMD_VX, -self.max_vx, self.max_vx)
+
+        # Deadzone, RESCALED: a raw deadzone both wastes the first 10% of travel and
+        # steps the command discontinuously at the edge. Renormalising (|v|-dz)/(1-dz)
+        # means the command leaves zero smoothly and full deflection still reaches 1.0.
+        def dz(v: float) -> float:
+            a = abs(v)
+            if a <= STICK_DEADZONE:
+                return 0.0
+            return np.sign(v) * (a - STICK_DEADZONE) / (1.0 - STICK_DEADZONE)
+
+        # Scale to the speed actually allowed, NOT to the trained maximum. Scaling to
+        # CMD_VX and then clipping to max_vx saturates the stick at max_vx/CMD_VX of
+        # its travel -- at the 0.2 default that is 40%, so more than half the stick did
+        # nothing and the usable band was painfully twitchy. Mapping full deflection
+        # onto the cap keeps every trained limit intact and gives back the resolution.
+        vx_range = min(CMD_VX, self.max_vx)
+        self.cmd[0] = np.clip(dz(ly) * vx_range, -vx_range, vx_range)
         self.cmd[1] = np.clip(dz(-lx) * CMD_VY, -CMD_VY, CMD_VY)
         self.cmd[2] = np.clip(dz(-rx) * CMD_YAW, -CMD_YAW, CMD_YAW)
         self.cmd[3] = 0.0
