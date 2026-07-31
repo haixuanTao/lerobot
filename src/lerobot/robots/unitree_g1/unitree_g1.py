@@ -104,6 +104,101 @@ _REMOTE_BUTTON_MAP: list[str] = [
 ]
 
 
+class _XInputPadReader:
+    """Background reader for an XInput USB gamepad, over libusb.
+
+    Runs its own thread rather than reading inside ``_controller_loop``: XInput pads
+    report only on change, so a read is usually a timeout, and a blocking USB call has
+    no business inside a 20 ms control budget. The thread owns the device and publishes
+    the latest decoded state under a lock, mirroring how lowstate is handled.
+
+    Report format is the standard 20-byte XInput frame::
+
+        [0]=type(0x00)  [1]=len(0x14)  [2]=buttons1  [3]=buttons2
+        [4]=LT  [5]=RT  [6:8]=LX  [8:10]=LY  [10:12]=RX  [12:14]=RY   (int16 LE)
+
+    Stick Y is positive-UP here (unlike joydev, where up is negative), which is already
+    the sign convention the locomotion controllers expect, so no inversion is applied.
+    """
+
+    _EP_IN = 0x81
+    _REPORT_LEN = 20
+    _AXIS_MAX = 32767.0
+    _BTN_LB = 0x01  # in buttons2; used as the deadman
+
+    def __init__(self, vid: int, pid: int):
+        require_package("pyusb", extra="unitree_g1", import_name="usb")
+        import usb.core
+        import usb.util
+
+        self._usb_util = usb.util
+        self._usb_core = usb.core
+        self._dev = usb.core.find(idVendor=vid, idProduct=pid)
+        if self._dev is None:
+            raise DeviceNotConnectedError(
+                f"No USB gamepad {vid:04x}:{pid:04x}. Check `lsusb`, and that a udev rule "
+                f"grants access (the device node is root-owned by default)."
+            )
+        # Defensive: nothing binds a class-0xff interface on the G1's kernel, but this
+        # keeps the reader working on a host that does have xpad.
+        try:
+            if self._dev.is_kernel_driver_active(0):
+                self._dev.detach_kernel_driver(0)
+        except (NotImplementedError, usb.core.USBError):
+            pass
+        self._dev.set_configuration()
+
+        self._lock = threading.Lock()
+        self._state: dict[str, float] | None = None
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        import struct
+
+        axes = struct.Struct("<hhhh")
+        while not self._stop.is_set():
+            try:
+                data = bytes(self._dev.read(self._EP_IN, self._REPORT_LEN, timeout=100))
+            except self._usb_core.USBError as e:
+                # ETIMEDOUT just means "state unchanged" for a report-on-change pad.
+                if e.errno == 110:
+                    continue
+                logger.warning(f"[UnitreeG1] USB pad read failed, stopping reader: {e}")
+                return
+            if len(data) < 14 or data[0] != 0x00:
+                continue
+            lx, ly, rx, ry = axes.unpack_from(data, 6)
+            with self._lock:
+                self._state = {
+                    "remote.lx": max(-1.0, lx / self._AXIS_MAX),
+                    "remote.ly": max(-1.0, ly / self._AXIS_MAX),
+                    "remote.rx": max(-1.0, rx / self._AXIS_MAX),
+                    "remote.ry": max(-1.0, ry / self._AXIS_MAX),
+                    "_deadman": float(bool(data[3] & self._BTN_LB)),
+                }
+
+    def read(self) -> dict | None:
+        """Latest axes, or None when the deadman is not held / nothing received yet.
+
+        Returning None (rather than zeros) is what lets the caller treat this exactly
+        like the physical remote: an idle input source yields to whatever else is
+        driving, instead of fighting it with a zero command.
+        """
+        with self._lock:
+            state = self._state
+        if state is None or not state["_deadman"]:
+            return None
+        return {k: v for k, v in state.items() if not k.startswith("_")}
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+        with contextlib.suppress(Exception):
+            self._usb_util.dispose_resources(self._dev)
+
+
 @dataclass
 class MotorState:
     q: float | None = None  # position
@@ -197,6 +292,8 @@ class UnitreeG1(Robot):
         # Onboard-only: parser for the physical Unitree wireless remote (read straight
         # from local lowstate so joystick locomotion works without a laptop round-trip).
         self._joystick = None
+        # Onboard-only: XInput USB gamepad plugged into the robot (config.usb_pad).
+        self._usb_pad = None
 
     @property
     def _sonic_token(self) -> bool:
@@ -348,9 +445,15 @@ class UnitreeG1(Robot):
                 with self._controller_action_lock:
                     controller_input = dict(self.controller_input)
 
-                # Onboard: the physical Unitree remote (in local lowstate) takes
-                # priority for locomotion when active; otherwise laptop/ZMQ axes stand.
+                # Onboard input priority, highest last: laptop/ZMQ axes (already in
+                # controller_input) < USB gamepad < physical Unitree remote. Each source
+                # returns None when idle, so an unused one never fights the others with
+                # a zero command.
                 if self.config.onboard:
+                    if self._usb_pad is not None:
+                        pad = self._usb_pad.read()
+                        if pad is not None:
+                            controller_input.update(pad)
                     wl = self._wireless_remote_input(lowstate)
                     if wl is not None:
                         controller_input.update(wl)
@@ -571,6 +674,16 @@ class UnitreeG1(Robot):
                 for axis in (self._joystick.lx, self._joystick.ly, self._joystick.rx, self._joystick.ry):
                     axis.smooth = 1.0
                     axis.deadzone = 0.0
+            # Real robot: optional USB gamepad as a locomotion input alongside (and
+            # below) the physical remote. Failing to open it must not take the robot
+            # down -- the remote and ZMQ paths still work without it.
+            if self.config.usb_pad:
+                vid, _, pid = self.config.usb_pad_id.partition(":")
+                try:
+                    self._usb_pad = _XInputPadReader(int(vid, 16), int(pid, 16))
+                    logger.info(f"USB gamepad {self.config.usb_pad_id} ready (hold LB to command)")
+                except Exception as e:  # noqa: BLE001
+                    logger.error(f"USB gamepad {self.config.usb_pad_id} unavailable: {e}")
 
         # Initialize direct motor control interface
         self.lowcmd_publisher = self._ChannelPublisher(kTopicLowCommand_Debug, hg_LowCmd)
@@ -660,6 +773,10 @@ class UnitreeG1(Robot):
 
         # Signal thread to stop and unblock any waits
         self._shutdown_event.set()
+
+        if self._usb_pad is not None:
+            self._usb_pad.stop()
+            self._usb_pad = None
 
         # Wait for subscribe thread to finish
         if self.subscribe_thread is not None:

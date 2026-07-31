@@ -225,6 +225,8 @@ def serve_onboard_controller(
     action_port: int = ACTION_PORT,
     state_port: int = STATE_PORT,
     state_fps: float = 30.0,
+    usb_pad: bool = False,
+    usb_pad_id: str = "2f24:008f",
     stop: threading.Event | None = None,
 ) -> None:
     """Run the negotiated controller ONBOARD -- the single control path on the robot.
@@ -254,6 +256,8 @@ def serve_onboard_controller(
         dds_interface=dds_interface,
         release_motion_control=not sim,
         physical_remote=not sim,
+        usb_pad=usb_pad,
+        usb_pad_id=usb_pad_id,
         cameras={},
     )
 
@@ -469,6 +473,17 @@ def main() -> None:
         metavar="CONTROLLER",
         help="Act as a client: propose CONTROLLER (or 'bridge') to --server-ip and print the reply",
     )
+    parser.add_argument(
+        "--usb-pad",
+        action="store_true",
+        help="[onboard] drive locomotion from an XInput USB gamepad plugged into the robot",
+    )
+    parser.add_argument(
+        "--usb-pad-id",
+        default="2f24:008f",
+        metavar="VID:PID",
+        help="[--usb-pad] USB id of the gamepad (default: 2f24:008f)",
+    )
     parser.add_argument("--server-ip", default="127.0.0.1", help="[--handshake-client] server IP")
     parser.add_argument(
         "--sonic-token-action",
@@ -547,6 +562,8 @@ def main() -> None:
                 cameras=cameras,
                 camera_fps=args.camera_fps,
                 camera_port=args.camera_port,
+                usb_pad=args.usb_pad,
+                usb_pad_id=args.usb_pad_id,
             )
             return
         print("[handshake] client selected raw DDS bridge (laptop owns control) -> legacy forward.")

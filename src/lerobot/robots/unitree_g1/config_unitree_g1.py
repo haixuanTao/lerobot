@@ -79,6 +79,16 @@ class UnitreeG1Config(RobotConfig):
     # its locomotion axes purely from send_action (ZMQ) input.
     release_motion_control: bool = True
     physical_remote: bool = True
+    # Onboard-only: read locomotion axes from an XInput USB gamepad plugged into the
+    # robot. Read over libusb rather than /dev/input/jsN on purpose -- an XInput pad
+    # presents a vendor-specific (0xff) interface that only the `xpad` driver binds, and
+    # the G1's Tegra kernel ships no xpad.ko, so no jsN node ever appears. Nothing claims
+    # the interface, which is exactly what lets libusb take it. Needs a udev rule giving
+    # the user access, e.g.
+    #   SUBSYSTEM=="usb", ATTR{idVendor}=="2f24", ATTR{idProduct}=="008f", MODE="0660", GROUP="plugdev"
+    # The physical Unitree remote still takes priority whenever it is active.
+    usb_pad: bool = False
+    usb_pad_id: str = "2f24:008f"
 
     # Cameras (ZMQ-based remote cameras)
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
