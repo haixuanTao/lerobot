@@ -53,13 +53,18 @@ Conventions replicated exactly from the training env (`biped_env_nexus.rs` /
     applied. Rotating them by -yaw as if they were world-frame is silent and
     expensive: it made every gyro-era policy spin and fall in MuJoCo while the
     source engine looked clean.
-  * gait clock is derived from the command, with no free-running phase:
-    frozen while |cmd| < 0.1 (yaw included in the magnitude), otherwise the
-    period lerps 0.8 s -> 0.55 s as speed goes 0.1 -> 0.5.
-  * target = clamp(default + action_scale * action, joint range), where
-    `action_scale` is 0.5 for the 45-dim generation and 0.25 for the 48-dim
-    one. Using the wrong scale doubles or halves every joint excursion.
-  * the PD gains below must match the ones the policy trained with.
+  * the gait clock FREE-RUNS at a fixed 0.7 s period and is never gated. It
+    keeps advancing at a zero command, so the policy stands still while its
+    clock runs -- that is the input it trained on. (An earlier version of this
+    file claimed the clock froze below |cmd| < 0.1 and that the period lerped
+    with speed. Both were wrong; the trainer gates the gait REWARD on movement,
+    not the clock, and the period is the constant BIPED_GAIT_PERIOD.)
+  * target = clamp(default + action_scale * action, joint range).
+  * action_scale and the PD gains are ONE package, not independent knobs. The
+    trainer ships two robot specs and each pairs its own scale with its own
+    gains: AGILE is 0.5 with knee 200/5.0, rl_gym is 0.25 with knee 150/4.0.
+    Running one spec's stiffness at the other's scale drives the joints harder
+    or softer than the actions were ever sized for.
 
 The G1's joint indices for the legs (`G1_29_JointIndex` 0-11) are already in
 zealot's canonical order, so no remapping is needed.
@@ -124,10 +129,15 @@ LEG_LIMITS = np.array(
     dtype=np.float32,
 )
 
-# Gait clock (command-derived, no knobs) — mirrors the trainer.
-GAIT_PERIOD_SLOW = 0.8
-GAIT_PERIOD_FAST = 0.55
-STANDING_SPEED = 0.1
+# Gait clock. Verified against the trainer (biped_env_nexus.rs:3011 and
+# velocity_flat.rs observe()): the phase advances EVERY control step at a FIXED
+# period, and enters the observation as raw (sin 2*pi*phi, cos 2*pi*phi) with no
+# gating. What is command-gated in the trainer is the gait REWARD ("only while
+# moving, no forced gait at stand"), not the clock and not the observation -- so
+# the policy always saw a running clock and learned to stand still anyway.
+# Freezing it at a stand, or varying the period with speed, feeds the policy a
+# clock it never trained against. BIPED_GAIT_PERIOD's default.
+GAIT_PERIOD = 0.7
 
 # Command ranges the policy was trained on. Joystick axes map onto these;
 # anything beyond is extrapolation the policy has never seen.
@@ -142,12 +152,28 @@ CMD_YAW = 0.6
 # Stick deadzone, rescaled rather than clipped (see _command_from_remote).
 STICK_DEADZONE = 0.1
 
-# PD gains, zealot's `unitree_g1_agile` spec with the v19 ankle package
-# (ankle kp 20 -> 40, kd 0.2 -> 2.0, matching the unitree_rl_gym deploy pair).
-# A policy trained at one set of gains and run at another is a different robot,
-# so these track the checkpoint, not the hardware defaults.
-LEG_KP = np.array([100.0, 100.0, 100.0, 200.0, 40.0, 40.0] * 2, dtype=np.float32)
-LEG_KD = np.array([2.5, 2.5, 2.5, 5.0, 2.0, 2.0] * 2, dtype=np.float32)
+# A policy trained at one set of gains and run at another is a different robot, so these
+# track the checkpoint, not the hardware defaults.
+# Verified against the trainer's two robot specs (zealot-env/src/robots/unitree_g1.rs).
+# Gains and action_scale are a MATCHED SET -- AGILE pairs its stiffer knee with
+# action_scale 0.5, rl_gym pairs its softer knee with 0.25. Mixing them runs the joints
+# at a stiffness the action amplitudes were not sized for.
+#   rl_gym : hip kd 2.0, knee 150/4.0, ankle 40/2.0   (action_scale 0.25)
+#   agile  : hip kd 2.5, knee 200/5.0, ankle 20/0.2   (action_scale 0.5)
+# "hybrid" is what shipped: AGILE hips+knee with rl_gym ankles, run at scale 0.25 --
+# i.e. an AGILE-stiffness knee driven by rl_gym-sized actions. Kept as the default only
+# so this change is a deliberate A/B rather than a silent retune; ZEALOT_GAINS=rl_gym
+# selects the package that actually matches action_scale 0.25.
+_GAIN_PACKAGES = {
+    "hybrid": ([100.0, 100.0, 100.0, 200.0, 40.0, 40.0], [2.5, 2.5, 2.5, 5.0, 2.0, 2.0]),
+    "rl_gym": ([100.0, 100.0, 100.0, 150.0, 40.0, 40.0], [2.0, 2.0, 2.0, 4.0, 2.0, 2.0]),
+    "agile": ([100.0, 100.0, 100.0, 200.0, 20.0, 20.0], [2.5, 2.5, 2.5, 5.0, 0.2, 0.1]),
+}
+_GAINS = os.environ.get("ZEALOT_GAINS", "hybrid").lower()
+if _GAINS not in _GAIN_PACKAGES:
+    raise ValueError(f"ZEALOT_GAINS must be one of {list(_GAIN_PACKAGES)}, got {_GAINS!r}")
+LEG_KP = np.array(_GAIN_PACKAGES[_GAINS][0] * 2, dtype=np.float32)
+LEG_KD = np.array(_GAIN_PACKAGES[_GAINS][1] * 2, dtype=np.float32)
 # Upper body: zealot's held-joint table (waist 12-14, arms 15-28).
 HELD_KP = {
     "waist": 300.0,
@@ -266,12 +292,6 @@ class _Policy:
             z = w @ a + b
             a = z if i == len(self.weights) - 1 else np.where(z > 0, z, np.expm1(z))
         return a
-
-
-def gait_period_for(cmd_speed: float) -> float:
-    """Cadence as a function of commanded speed (trainer's exact mapping)."""
-    t = (min(abs(cmd_speed), 0.5) - STANDING_SPEED) / 0.4
-    return GAIT_PERIOD_SLOW + (GAIT_PERIOD_FAST - GAIT_PERIOD_SLOW) * max(t, 0.0)
 
 
 class ZealotLocomotionController:
@@ -401,17 +421,8 @@ class ZealotLocomotionController:
         # Command-derived clock: frozen when the command is a stand, so the
         # policy sees a distinct standing observation instead of a clock that
         # keeps waving "swing" at it.
-        speed = float(np.linalg.norm(self.cmd[:3]))
-        if speed >= STANDING_SPEED or self.stand_phase == "run":
-            # "run": the clock never stops, so a zero command marches in place at the
-            # slow cadence (gait_period_for(0) == GAIT_PERIOD_SLOW). This is what the
-            # policy does in the training sim, which is the strongest evidence available
-            # about what it expects -- a frozen clock is an observation it never saw.
-            self.phase = (self.phase + CONTROL_DT / gait_period_for(speed)) % 1.0
-        elif self.stand_phase == "zero":
-            # Canonical (sin=0, cos=1) stand, rather than wherever the stride stopped.
-            self.phase = 0.0
-        # "hold" (default): leave the phase where it froze.
+        # Unconditional, fixed-period advance -- exactly as the trainer does it.
+        self.phase = (self.phase + CONTROL_DT / GAIT_PERIOD) % 1.0
 
         frame = np.zeros(self.policy.frame, dtype=np.float32)
         frame[0:12] = self.act_hist[0] if self.step_idx >= 2 else 0.0
