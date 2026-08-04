@@ -147,18 +147,20 @@ HELD_HOME = {
     "elbow": 1.28,
 }
 
-# Default Hub location for the released checkpoint. This is the checkpoint that
-# has actually been driven on hardware (byte-identical to the local v21 used for
-# the out-and-back bring-up run), which is what the default must be: onboard,
-# with no ZEALOT_POLICY_PATH set, this is the policy that walks the robot.
+# Default Hub location for the released checkpoint. Onboard, with no
+# ZEALOT_POLICY_PATH set, this is the policy that walks the robot, so it tracks
+# the current release rather than whatever was newest when this file was
+# written. v26 is a 48-wide (gyro) frame; the previous default, v21_iter4560,
+# was 45-wide and is the last checkpoint flown on hardware.
 DEFAULT_REPO_ID = "haixuantao/zealot-g1-locomotion"
-DEFAULT_FILENAME = "g1_v21_iter4560.safetensors"
+DEFAULT_FILENAME = "g1_v26_iter42290.safetensors"
 
 # --- safety ---------------------------------------------------------------
 # Hard cap on the commanded forward speed, independent of the joystick. The
 # released policies overshoot their command, so this bounds what the operator
-# can ask for during bring-up. Override with ZEALOT_MAX_VX.
-MAX_VX_DEFAULT = 0.2
+# can ask for. Override with ZEALOT_MAX_VX -- set it back to 0.2 for the first
+# run of any new checkpoint, which is what bring-up used through v21.
+MAX_VX_DEFAULT = 0.4
 
 # Blend from the pose the robot is actually in toward the policy's target over
 # this many control steps, so engaging the controller can't step-jerk the legs.
@@ -311,8 +313,21 @@ class ZealotLocomotionController:
         # them the policy is extrapolating, which is where it falls over.
         dz = lambda v: v if abs(v) > 0.1 else 0.0  # noqa: E731
         self.cmd[0] = np.clip(dz(ly) * CMD_VX, -self.max_vx, self.max_vx)
-        self.cmd[1] = np.clip(dz(-lx) * CMD_VY, -CMD_VY, CMD_VY)
-        self.cmd[2] = np.clip(dz(-rx) * CMD_YAW, -CMD_YAW, CMD_YAW)
+        # Steer, don't strafe. The lateral stick commands a YAW RATE, so asking
+        # for forward+sideways turns the robot toward where it is going instead
+        # of crabbing there sideways. Both sticks steer in the same direction
+        # (stick right turns right), and they sum so either one alone works;
+        # with no forward speed this becomes a turn in place.
+        #
+        # vy is therefore always 0. The policy still SEES a vy command slot --
+        # it trained with one -- we simply never ask for lateral motion, which
+        # is a command it saw plenty of during training (CMD_VY is kept above
+        # as the documented trained range, not because we command it).
+        # Steering is NOT inverted when reversing: stick right turns right
+        # whichever way the robot is walking, which is easier to fly than car
+        # reverse-steer when you are the one holding the gantry.
+        self.cmd[1] = 0.0
+        self.cmd[2] = np.clip((dz(-lx) + dz(-rx)) * CMD_YAW, -CMD_YAW, CMD_YAW)
         self.cmd[3] = 0.0
 
     def run_step(self, action: dict, lowstate) -> dict:
