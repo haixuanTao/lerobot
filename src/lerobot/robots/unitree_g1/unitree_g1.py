@@ -81,6 +81,11 @@ class LocomotionController(Protocol):
 kTopicLowCommand_Debug = "rt/lowcmd"
 kTopicLowState = "rt/lowstate"
 
+# How many times to ask the built-in motion service to hand over low-level
+# control (1 s apart) before giving up and reporting it, rather than retrying
+# forever and looking like a hang.
+RELEASE_MODE_ATTEMPTS = 10
+
 # Wireless-remote button byte layout, mapped to the positional button indices the
 # locomotion controllers expect. Used in onboard mode to read the physical Unitree
 # remote from lowstate (mirrors the exo teleoperator's RemoteController).
@@ -500,12 +505,30 @@ class UnitreeG1(Robot):
         msc = MotionSwitcherClient()
         msc.SetTimeout(5.0)
         msc.Init()
-        _, result = msc.CheckMode()
-        while result is not None and "name" in result and result["name"]:
-            logger.info("[UnitreeG1] Releasing built-in mode '%s'...", result["name"])
-            msc.ReleaseMode()
+
+        def holding() -> str:
+            """Name of the built-in service still owning control, '' if none."""
             _, result = msc.CheckMode()
+            return result.get("name", "") if isinstance(result, dict) else ""
+
+        # Bounded: if the robot will not hand over, say so instead of retrying
+        # forever. An unbounded loop here is indistinguishable from a hang --
+        # the server sits after the handshake and never comes up, which reads
+        # as "development mode did not activate" with nothing to act on.
+        for _ in range(RELEASE_MODE_ATTEMPTS):
+            name = holding()
+            if not name:
+                return
+            logger.info("[UnitreeG1] Releasing built-in mode '%s'...", name)
+            msc.ReleaseMode()
             time.sleep(1.0)
+
+        raise DeviceNotConnectedError(
+            f"The G1 is still running its built-in service '{holding()}' after "
+            f"{RELEASE_MODE_ATTEMPTS} release attempts, so low-level control is "
+            "unavailable. Put the robot into debug/development mode (suspend the "
+            "built-in controller) and try again."
+        )
 
     # ------------------------------------------------------------------ #
     # Thin-client role (laptop): no DDS, no controller. Talks to run_g1_server

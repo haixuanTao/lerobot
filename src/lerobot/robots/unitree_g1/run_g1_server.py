@@ -67,6 +67,10 @@ LOWCMD_PORT = 6000
 LOWSTATE_PORT = 6001
 NUM_MOTORS = 35
 
+# Attempts to reclaim low-level control from the built-in motion service, 1 s
+# apart, before failing with a message instead of retrying forever.
+RELEASE_MODE_ATTEMPTS = 10
+
 # Onboard high-level channels (serve_onboard_controller): compact actions in, state out.
 ACTION_PORT = 6004
 STATE_PORT = 6005
@@ -578,11 +582,26 @@ def main() -> None:
     msc.SetTimeout(5.0)
     msc.Init()
 
-    status, result = msc.CheckMode()
-    while result is not None and "name" in result and result["name"]:
+    # Bounded, for the same reason as UnitreeG1._release_motion_control: a robot
+    # that will not hand over control must fail loudly, not spin here forever
+    # looking like the bridge simply never started.
+    def _holding() -> str:
+        _, result = msc.CheckMode()
+        return result.get("name", "") if isinstance(result, dict) else ""
+
+    for _ in range(RELEASE_MODE_ATTEMPTS):
+        name = _holding()
+        if not name:
+            break
+        print(f"Releasing built-in mode {name!r}...")
         msc.ReleaseMode()
-        status, result = msc.CheckMode()
         time.sleep(1.0)
+    else:
+        raise RuntimeError(
+            f"The G1 is still running its built-in service {_holding()!r} after "
+            f"{RELEASE_MODE_ATTEMPTS} release attempts, so low-level control is "
+            "unavailable. Put the robot into debug/development mode and try again."
+        )
 
     crc = CRC()
 
