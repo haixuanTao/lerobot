@@ -79,6 +79,19 @@ class UnitreeG1Config(RobotConfig):
     # its locomotion axes purely from send_action (ZMQ) input.
     release_motion_control: bool = True
     physical_remote: bool = True
+    # Read a USB/Bluetooth gamepad attached to THIS machine (via pygame) as a
+    # second source of locomotion axes, for when the Unitree remote is not to
+    # hand. Onboard only, and strictly lower priority than the Unitree remote,
+    # which always wins while it is being touched. Off by default: a pad plugged
+    # into the robot should never start steering it without being asked for.
+    local_gamepad: bool = False
+    # Joystick index, and the axis indices to read from it. Defaults suit an
+    # Xbox-style layout (left stick 0/1, right stick X on 2); an 8BitDo Ultimate
+    # reports 6 axes with the triggers on 4/5. Check with `jstest /dev/input/js0`.
+    local_gamepad_index: int = 0
+    local_gamepad_axes: tuple[int, int, int] = (0, 1, 2)  # lx, ly, rx
+    # Button that must be HELD for the pad's axes to count. None = always live.
+    local_gamepad_deadman: int | None = None
 
     # Cameras (ZMQ-based remote cameras)
     cameras: dict[str, CameraConfig] = field(default_factory=dict)

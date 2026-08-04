@@ -208,6 +208,8 @@ def serve_onboard_controller(
     action_port: int = ACTION_PORT,
     state_port: int = STATE_PORT,
     state_fps: float = 30.0,
+    local_gamepad: bool = False,
+    local_gamepad_deadman: int | None = None,
     stop: threading.Event | None = None,
 ) -> None:
     """Run the negotiated controller ONBOARD -- the single control path on the robot.
@@ -237,6 +239,8 @@ def serve_onboard_controller(
         dds_interface=dds_interface,
         release_motion_control=not sim,
         physical_remote=not sim,
+        local_gamepad=local_gamepad,
+        local_gamepad_deadman=local_gamepad_deadman,
         cameras={},
     )
 
@@ -458,6 +462,19 @@ def main() -> None:
         action="store_true",
         help="[handshake] negotiate the 64-D SONIC token action interface",
     )
+    parser.add_argument(
+        "--gamepad",
+        action="store_true",
+        help="Also read a USB/Bluetooth gamepad attached to the robot for locomotion axes "
+        "(the Unitree remote still overrides it whenever it is touched)",
+    )
+    parser.add_argument(
+        "--gamepad-deadman",
+        type=int,
+        default=None,
+        metavar="BUTTON",
+        help="[--gamepad] button index that must be HELD for the pad's axes to count",
+    )
     args = parser.parse_args()
 
     # --- Isolated handshake test paths (no DDS, safe to run on a laptop) ---
@@ -530,6 +547,8 @@ def main() -> None:
                 cameras=cameras,
                 camera_fps=args.camera_fps,
                 camera_port=args.camera_port,
+                local_gamepad=args.gamepad,
+                local_gamepad_deadman=args.gamepad_deadman,
             )
             return
         print("[handshake] client selected raw DDS bridge (laptop owns control) -> legacy forward.")

@@ -197,6 +197,10 @@ class UnitreeG1(Robot):
         # Onboard-only: parser for the physical Unitree wireless remote (read straight
         # from local lowstate so joystick locomotion works without a laptop round-trip).
         self._joystick = None
+        # Onboard-only: optional USB/Bluetooth pad on this machine (see
+        # ``local_gamepad``), opened at connect time.
+        self._gamepad = None
+        self._gamepad_failed = False
 
     @property
     def _sonic_token(self) -> bool:
@@ -348,9 +352,15 @@ class UnitreeG1(Robot):
                 with self._controller_action_lock:
                     controller_input = dict(self.controller_input)
 
-                # Onboard: the physical Unitree remote (in local lowstate) takes
-                # priority for locomotion when active; otherwise laptop/ZMQ axes stand.
+                # Onboard locomotion axes, lowest priority first, so the source
+                # the operator is physically touching always wins:
+                #   ZMQ (send_action)  <  local gamepad  <  Unitree remote
+                # Each source reports None when idle, so letting go of one falls
+                # back to the next rather than latching zeros over it.
                 if self.config.onboard:
+                    gp = self._local_gamepad_input()
+                    if gp is not None:
+                        controller_input.update(gp)
                     wl = self._wireless_remote_input(lowstate)
                     if wl is not None:
                         controller_input.update(wl)
@@ -376,6 +386,74 @@ class UnitreeG1(Robot):
 
     def configure(self) -> None:
         pass
+
+    def _open_local_gamepad(self):
+        """Open the configured gamepad via pygame, or return None with a warning."""
+        try:
+            import os
+
+            # The robot runs headless; without this SDL refuses to init at all.
+            os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+            import pygame
+
+            pygame.init()
+            pygame.joystick.init()
+            if pygame.joystick.get_count() == 0:
+                logger.warning("local_gamepad is set but no gamepad was found; ignoring")
+                return None
+            pad = pygame.joystick.Joystick(self.config.local_gamepad_index)
+            pad.init()
+            logger.info(
+                f"Local gamepad: {pad.get_name()} "
+                f"(axes={pad.get_numaxes()}, buttons={pad.get_numbuttons()}, "
+                f"deadman={self.config.local_gamepad_deadman})"
+            )
+            return pad
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not open local gamepad ({e}); ignoring")
+            return None
+
+    def _local_gamepad_input(self) -> dict | None:
+        """Read a gamepad attached to this machine into controller inputs.
+
+        Onboard only, and only when ``local_gamepad`` is set. Returns None when
+        the pad is idle (or absent, or the deadman is not held) so the next
+        source down keeps control -- same contract as the Unitree remote, which
+        overrides this whenever it is touched.
+
+        Axis signs are normalised to match the Unitree remote: stick forward is
+        +ly, stick right is +lx. SDL reports the Y axis positive-down, hence the
+        inversion, and a disconnected pad reads as idle rather than raising.
+        """
+        pad = self._gamepad
+        if pad is None:
+            return None
+        try:
+            import pygame
+
+            pygame.event.pump()
+            deadman = self.config.local_gamepad_deadman
+            if deadman is not None and not pad.get_button(deadman):
+                return None
+            i_lx, i_ly, i_rx = self.config.local_gamepad_axes
+            n = pad.get_numaxes()
+            axis = lambda i: float(pad.get_axis(i)) if 0 <= i < n else 0.0  # noqa: E731
+            axes = {
+                "remote.lx": axis(i_lx),
+                "remote.ly": -axis(i_ly),  # SDL: +Y is down, we want +ly forward
+                "remote.rx": axis(i_rx),
+                "remote.ry": 0.0,
+            }
+        except Exception as e:  # noqa: BLE001 -- a pad that dies must not stop the loop
+            # Warn once rather than every 20 ms: a pad that unpairs mid-run would
+            # otherwise fail silently, looking exactly like a centred stick.
+            if not self._gamepad_failed:
+                self._gamepad_failed = True
+                logger.warning(f"Local gamepad read failed ({e}); ignoring it from here on")
+            return None
+        # Idle means "not being touched", so a centred stick hands control back
+        # instead of pinning the command to zero.
+        return axes if any(abs(v) > 1e-2 for v in axes.values()) else None
 
     def _wireless_remote_input(self, lowstate) -> dict | None:
         """Parse the physical Unitree remote from lowstate into controller inputs.
@@ -571,6 +649,11 @@ class UnitreeG1(Robot):
                 for axis in (self._joystick.lx, self._joystick.ly, self._joystick.rx, self._joystick.ry):
                     axis.smooth = 1.0
                     axis.deadzone = 0.0
+            # Optional USB/Bluetooth pad on this machine, as a fallback source of
+            # locomotion axes. Failing to open one is logged and ignored: it is a
+            # convenience input, and losing it must not stop the robot coming up.
+            if self.config.local_gamepad:
+                self._gamepad = self._open_local_gamepad()
 
         # Initialize direct motor control interface
         self.lowcmd_publisher = self._ChannelPublisher(kTopicLowCommand_Debug, hg_LowCmd)
